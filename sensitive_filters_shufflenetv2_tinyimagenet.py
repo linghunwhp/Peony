@@ -389,14 +389,63 @@ def controlled_training(model_args, model, train_loader, test_loader, mutual_cla
     return model_state_dicts
 
 
-def patching(original_state_dict, new_model_state_dict, filters_for_aspects):
-    for layer in original_state_dict:
-        layer_size = original_state_dict[layer].size()
-        if len(layer_size) == 4:
-            for filter_index in range(layer_size[0]):
-                if {'layer': layer, 'filter_index': filter_index} in filters_for_aspects:
-                    original_state_dict[layer][filter_index] = new_model_state_dict[layer][filter_index]
-    return original_state_dict
+def patching(model_args, original_model, model_state_dict_all, mutual_classes, filters_for_aspects, train_loader, test_loader):
+    train_acc = test(model=original_model, test_loader=train_loader)
+    test_acc = test(model=original_model, test_loader=test_loader)
+    original_avg_test_acc, original_test_acc_class = test_class(model_args=model_args, model=original_model, test_loader=test_loader)
+    original_ground_truth_list, original_prediction_list = get_ground_truth_prediction(model_args=args, model=net, data_loader=testing_loader)
+
+    original_conf_matrix = confusion_matrix(original_ground_truth_list, original_prediction_list)
+
+    for mutual_class in mutual_classes:
+        print(f"Original model: mutual_class: {mutual_class}, original_avg_test_acc: {original_avg_test_acc}, "
+              f"original: train_acc: {train_acc}, test_acc: {test_acc}, "
+              f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[0]]*2 + original_conf_matrix[mutual_class[1]][mutual_class[1]]*2}, "
+              f"{str(mutual_class[1])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[1]]*2 + original_conf_matrix[mutual_class[1]][mutual_class[0]]*2}")
+
+    train_optimizer = optim.SGD(original_model.parameters(), lr=0.001, momentum=0.9, weight_decay=1e-4)
+    loss_function_ce = nn.CrossEntropyLoss()
+    for epoch in range(1, 31):
+        filters_for_aspect = None
+        index = 0
+        original_model_state_dict = model_state_dict_all[index]
+        for mutual_class in mutual_classes:
+            if index != 0:
+                for current in filters_for_aspects:
+                    if current['mutual_class'] == mutual_class:
+                        filters_for_aspect = current['sensitive_filters_class_both']
+
+                state_dict_temp = model_state_dict_all[index]
+                for layer in original_model_state_dict:
+                    layer_size = original_model_state_dict[layer].size()
+                    if len(layer_size) == 4:
+                        for filter_index in range(layer_size[0]):
+                            if {'layer': layer, 'filter_index': filter_index} not in filters_for_aspect:
+                                original_model_state_dict[layer][filter_index] = state_dict_temp[layer][filter_index]
+            index += 1
+
+        original_model.load_state_dict(original_model_state_dict)
+        for index, (images, labels) in enumerate(train_loader):
+            if model_args.gpu:
+                images = images.to(settings.CUDA)
+                labels = labels.to(settings.CUDA)
+            train_optimizer.zero_grad()
+            outputs = original_model(images)
+            loss = loss_function_ce(outputs, labels)
+            loss.backward()
+            train_optimizer.step()
+
+        train_acc = test(model=original_model, test_loader=train_loader)
+        test_acc = test(model=original_model, test_loader=test_loader)
+        avg_test_acc, test_acc_class = test_class(model_args=model_args, model=original_model, test_loader=test_loader)
+        ground_truth_list, prediction_list = get_ground_truth_prediction(model_args=args, model=net, data_loader=testing_loader)
+        conf_matrix = confusion_matrix(ground_truth_list, prediction_list)
+
+        for mutual_class in mutual_classes:
+            print(f"Epoch: {epoch}, mutual_class: {mutual_class}, epoch: {epoch}, avg_test_acc: {avg_test_acc}, "
+                  f"train_acc: {train_acc}, test_acc: {test_acc}, "
+                  f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {conf_matrix[mutual_class[0]][mutual_class[0]]*2 + conf_matrix[mutual_class[1]][mutual_class[1]]*2}, "
+                  f"{str(mutual_class[0])}_to_{str(mutual_class[1])}: {conf_matrix[mutual_class[0]][mutual_class[1]]*2 + conf_matrix[mutual_class[1]][mutual_class[0]]*2}")
 
 
 if __name__ == '__main__':
@@ -408,6 +457,7 @@ if __name__ == '__main__':
     parser.add_argument('-lr', type=float, default=0.0001, help='initial learning rate')
     parser.add_argument('-num_class', type=float, default=200, help='class number')
     parser.add_argument('-dataset_name', type=str, default='tiny_imagenet', help='dataset name')
+    parser.add_argument('-repairing', type=bool, default=False, help='repairing the original model')
     args = parser.parse_args()
 
     net = get_network(args)
@@ -448,5 +498,13 @@ if __name__ == '__main__':
               "Number of filters for class ", filters_in_1_aspects['mutual_class'][1], ":", len(filters_in_1_aspects['sensitive_filters_class_1']))
 
     net.load_state_dict(torch.load(args.weights))
-    model_state_dicts_3_aspects = controlled_training(model_args=args, model=net, train_loader=training_loader, test_loader=testing_loader, mutual_classes=mutual_misclassified_classes, filters_for_aspects=filters_in_3_aspects, noise_var=0.1)
-    patching(original_state_dict=torch.load(args.weights), new_model_state_dict=model_state_dicts_3_aspects[0], filters_for_aspects=filters_in_3_aspects)
+    if args.repairing:
+        model_state_dicts_3_aspects = controlled_training(model_args=args, model=net, train_loader=training_loader, test_loader=testing_loader, mutual_classes=mutual_misclassified_classes, filters_for_aspects=filters_in_3_aspects, noise_var=0.1)
+    else:
+        print("Model Repair with Incremental Patching")
+        state_dict_3 = []
+        state_dict_3.append(torch.load('results_mobilenet_cifar100/var_0.1/mutual_class_[47, 52]_noise_var_0.1_epoch_5.pth', map_location=settings.CUDA))
+        state_dict_3.append(torch.load('results_mobilenet_cifar100/var_0.1/mutual_class_[35, 98]_noise_var_0.1_epoch_20.pth', map_location=settings.CUDA))
+        state_dict_3.append(torch.load('results_mobilenet_cifar100/var_0.1/mutual_class_[13, 81]_noise_var_0.1_epoch_22.pth', map_location=settings.CUDA))
+        patching(model_args=args, original_model=net, model_state_dict_all=state_dict_3, mutual_classes=mutual_misclassified_classes, filters_for_aspects=filters_in_3_aspects, train_loader=training_loader, test_loader=testing_loader)
+
