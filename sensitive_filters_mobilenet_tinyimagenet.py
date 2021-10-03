@@ -389,35 +389,56 @@ def patching(model_args, original_model, model_state_dict_all, mutual_classes, f
     original_ground_truth_list, original_prediction_list = get_ground_truth_prediction(model_args=args, model=net, data_loader=testing_loader)
 
     original_conf_matrix = confusion_matrix(original_ground_truth_list, original_prediction_list)
-
     for mutual_class in mutual_classes:
         print(f"Original model: mutual_class: {mutual_class}, original_avg_test_acc: {original_avg_test_acc}, "
               f"original: train_acc: {train_acc}, test_acc: {test_acc}, "
-              f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[0]]*2 + original_conf_matrix[mutual_class[1]][mutual_class[1]]*2}, "
-              f"{str(mutual_class[1])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[1]]*2 + original_conf_matrix[mutual_class[1]][mutual_class[0]]*2}")
+              f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[0]] + original_conf_matrix[mutual_class[1]][mutual_class[1]]}, "
+              f"{str(mutual_class[1])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[1]] + original_conf_matrix[mutual_class[1]][mutual_class[0]]}")
 
+    # filter patching
+    filters_for_both = None
+    filters_for_0 = None
+    filters_for_1 = None
+    model_index = 0
+    # original_model_state_dict = original_model.state_dict()
+    original_model_state_dict = model_state_dict_all[model_index]
+    for mutual_class in mutual_classes:
+        if model_index != 0:
+            for current in filters_for_aspects:
+                if current['mutual_class'] == mutual_class:
+                    filters_for_both = current['sensitive_filters_class_both']
+                    filters_for_0 = current['sensitive_filters_class_0']
+                    filters_for_1 = current['sensitive_filters_class_1']
+
+            state_dict_temp = model_state_dict_all[model_index]
+            for layer in original_model_state_dict:
+                layer_size = original_model_state_dict[layer].size()
+                if len(layer_size) == 4:
+                    for filter_index in range(layer_size[0]):
+                        if {'layer': layer, 'filter_index': filter_index} in filters_for_both or \
+                                {'layer': layer, 'filter_index': filter_index} in filters_for_0 or \
+                                {'layer': layer, 'filter_index': filter_index} in filters_for_1:
+                            original_model_state_dict[layer][filter_index] = state_dict_temp[layer][filter_index]
+        model_index += 1
+
+    # test after patching
+    original_model.load_state_dict(original_model_state_dict)
+    train_acc = test(model=original_model, test_loader=train_loader)
+    test_acc = test(model=original_model, test_loader=test_loader)
+    original_avg_test_acc, original_test_acc_class = test_class(model_args=model_args, model=original_model, test_loader=test_loader)
+    original_ground_truth_list, original_prediction_list = get_ground_truth_prediction(model_args=args, model=net, data_loader=testing_loader)
+
+    original_conf_matrix = confusion_matrix(original_ground_truth_list, original_prediction_list)
+    for mutual_class in mutual_classes:
+        print(f"After patching: mutual_class: {mutual_class}, original_avg_test_acc: {original_avg_test_acc}, "
+              f"original: train_acc: {train_acc}, test_acc: {test_acc}, "
+              f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[0]] + original_conf_matrix[mutual_class[1]][mutual_class[1]]}, "
+              f"{str(mutual_class[1])}_to_{str(mutual_class[0])}: {original_conf_matrix[mutual_class[0]][mutual_class[1]] + original_conf_matrix[mutual_class[1]][mutual_class[0]]}")
+
+    # retraining
     train_optimizer = optim.SGD(original_model.parameters(), lr=0.001, momentum=0.9, weight_decay=1e-4)
     loss_function_ce = nn.CrossEntropyLoss()
     for epoch in range(1, 31):
-        filters_for_aspect = None
-        index = 0
-        original_model_state_dict = model_state_dict_all[index]
-        for mutual_class in mutual_classes:
-            if index != 0:
-                for current in filters_for_aspects:
-                    if current['mutual_class'] == mutual_class:
-                        filters_for_aspect = current['sensitive_filters_class_both']
-
-                state_dict_temp = model_state_dict_all[index]
-                for layer in original_model_state_dict:
-                    layer_size = original_model_state_dict[layer].size()
-                    if len(layer_size) == 4:
-                        for filter_index in range(layer_size[0]):
-                            if {'layer': layer, 'filter_index': filter_index} not in filters_for_aspect:
-                                original_model_state_dict[layer][filter_index] = state_dict_temp[layer][filter_index]
-            index += 1
-
-        original_model.load_state_dict(original_model_state_dict)
         for index, (images, labels) in enumerate(train_loader):
             if model_args.gpu:
                 images = images.to(settings.CUDA)
@@ -437,8 +458,8 @@ def patching(model_args, original_model, model_state_dict_all, mutual_classes, f
         for mutual_class in mutual_classes:
             print(f"Epoch: {epoch}, mutual_class: {mutual_class}, epoch: {epoch}, avg_test_acc: {avg_test_acc}, "
                   f"train_acc: {train_acc}, test_acc: {test_acc}, "
-                  f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {conf_matrix[mutual_class[0]][mutual_class[0]]*2 + conf_matrix[mutual_class[1]][mutual_class[1]]*2}, "
-                  f"{str(mutual_class[0])}_to_{str(mutual_class[1])}: {conf_matrix[mutual_class[0]][mutual_class[1]]*2 + conf_matrix[mutual_class[1]][mutual_class[0]]*2}")
+                  f"{str(mutual_class[0])}_to_{str(mutual_class[0])}: {conf_matrix[mutual_class[0]][mutual_class[0]] + conf_matrix[mutual_class[1]][mutual_class[1]]}, "
+                  f"{str(mutual_class[0])}_to_{str(mutual_class[1])}: {conf_matrix[mutual_class[0]][mutual_class[1]] + conf_matrix[mutual_class[1]][mutual_class[0]]}")
 
 
 if __name__ == '__main__':
